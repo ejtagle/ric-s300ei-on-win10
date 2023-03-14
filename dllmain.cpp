@@ -129,6 +129,60 @@ VectoredHandler(
     if (instr != 0xEE && instr != 0xEC && instr != 0xE6 && instr != 0xE4 && instr != 0xFA && instr != 0xFB)
         return EXCEPTION_CONTINUE_SEARCH;
 
+    // -----------Capture acceleration
+    if (instr == 0xFA && (Context->Eip & 0x1FFFF) == 0x4DD3) {
+        // Start of timer readback
+
+        // Plug in the value to return
+        Context->Eax &= 0xFFFF0000;
+        Context->Eax |= PITValue ^ 0xFFFF;
+
+        rdCount++;
+        if (rdCount > 2) { // The first 2 reads will return 0xFFFF, just to avoid problems
+            LARGE_INTEGER currTimerValue;
+            QueryPerformanceCounter((LARGE_INTEGER*)&currTimerValue);
+            uint64_t ctr = ((currTimerValue.QuadPart - StartTimerValue.QuadPart) / TimerFreq.QuadPart);
+            PITValue = (ctr > 65535ULL) ? 0 : (USHORT)(65535ULL - ctr);
+        }
+
+        // Skip routine
+        Context->Eip += 0x4E08 - 0x4DD3;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (instr == 0xE6 && (Context->Eip & 0x1FFFF) == 0x4DB2) {
+        // Start of timer reset
+
+        // Starting timer
+        QueryPerformanceFrequency(&TimerFreq);
+        TimerFreq.QuadPart /= 1000000ULL; // Convert to MHZ
+        if (!TimerFreq.QuadPart) TimerFreq.QuadPart = 1;
+        QueryPerformanceCounter(&StartTimerValue);
+        rdStep = 0;
+        rdCount = 0;
+        PITValue = 0xFFFF;
+
+        // Skip routine
+        Context->Eip += 0x4DC6 - 0x4DB2;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (instr == 0xEC && (Context->Eip & 0x1FFFF) == 0x58A1) {
+        // Start of scan line readback
+
+        DWORD count = Context->Ecx;
+        PBYTE dst = (PBYTE)Context->Edi;
+        USHORT addr = Context->Edx & 0xFFFF;
+        do {
+            *dst++ = DlPortReadPortUchar(addr);
+        } while (--count);
+        Context->Edi = (DWORD)dst;
+        Context->Ecx = 0;
+
+        // Skip routine
+        Context->Eip += 0x58A5 - 0x58A1;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    //--------------------
+    
     // CLI/STI
     if (instr == 0xFA || instr == 0xFB) {
         Context->Eip++;
