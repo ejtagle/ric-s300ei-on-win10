@@ -1,6 +1,21 @@
 // dllmain.cpp : Define el punto de entrada de la aplicación DLL.
 #include "pch.h"
+#include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
+#include <winioctl.h>
+
+int Log(const char* format, ...)
+{
+    static char s_printf_buf[1024];
+    va_list args;
+    va_start(args, format);
+    int cnt = _vsnprintf_s(s_printf_buf, sizeof(s_printf_buf)-1, format, args);
+    va_end(args);
+    s_printf_buf[cnt] = 0;
+    OutputDebugStringA(s_printf_buf);
+    return 0;
+}
 
 // NOTE: The CONTEXT structure contains processor-specific 
 // information. This sample was designed for X86 processors.
@@ -14,16 +29,9 @@
 
 static PVOID hOldVectorHandler = NULL;
 static HINSTANCE hRIC32Dll = NULL;
-static HINSTANCE hInpOutDll = NULL;
 
-//DLLPortIO function support
-typedef BOOL(__stdcall* lpIsInpOutDriverOpen)(void);
-typedef UCHAR   (_stdcall *lpDlPortReadPortUchar)(USHORT port);
-typedef void    (_stdcall *lpDlPortWritePortUchar)(USHORT port, UCHAR Value);
 
-lpIsInpOutDriverOpen IsInpOutDriverOpen = NULL;
-lpDlPortReadPortUchar DlPortReadPortUchar = NULL;
-lpDlPortWritePortUchar DlPortWritePortUchar = NULL;
+
 
 // Twain 
 typedef uint16_t (__stdcall* lpDS_Entry)(void* pOrigin, uint32_t DG, uint16_t DAT, uint16_t MSG, void* pData);
@@ -36,6 +44,379 @@ int rdStep = 0;
 int rdCount = 0;
 BYTE emulatedPort[4] = { 0 };
 BYTE emulatedPortHI[4] = { 0 };
+
+#if 0
+//DLLPortIO function support
+
+static HINSTANCE hInpOutDll = NULL;
+typedef BOOL(__stdcall* lpIsInpOutDriverOpen)(void);
+typedef UCHAR(_stdcall* lpDlPortReadPortUchar)(USHORT port);
+typedef void(_stdcall* lpDlPortWritePortUchar)(USHORT port, UCHAR Value);
+static lpIsInpOutDriverOpen IsInpOutDriverOpen = NULL;
+static lpDlPortReadPortUchar DlPortReadPortUchar = NULL;
+static lpDlPortWritePortUchar DlPortWritePortUchar = NULL;
+
+static BOOL EnablePortAccess(int portNumber)
+{
+    if (portNumber != 0 )
+        return FALSE;
+
+    if (hInpOutDll)
+        return TRUE;
+
+    hInpOutDll = LoadLibraryA("inpout32.dll");
+    if (!hInpOutDll) {
+        MessageBoxA(NULL, "Unable to open inout DLL", "ERROR", MB_OK | MB_ICONERROR);
+        return FALSE;
+    }
+
+    // Get the IO functions we need to communicate with the scanner.
+    IsInpOutDriverOpen = (lpIsInpOutDriverOpen)GetProcAddress(hInpOutDll, "IsInpOutDriverOpen");
+    DlPortReadPortUchar = (lpDlPortReadPortUchar)GetProcAddress(hInpOutDll, "DlPortReadPortUchar");
+    DlPortWritePortUchar = (lpDlPortWritePortUchar)GetProcAddress(hInpOutDll, "DlPortWritePortUchar");
+
+    if (!IsInpOutDriverOpen ||
+        !DlPortReadPortUchar ||
+        !DlPortWritePortUchar) {
+        static BOOL shown = FALSE;
+        if (shown) return FALSE;
+        shown = TRUE;
+        MessageBoxA(NULL, "Unable to resolve Inpout entrypoints", "ERROR", MB_OK | MB_ICONERROR);
+        return FALSE;
+    }
+
+    if (!IsInpOutDriverOpen()) {
+        static BOOL shown = FALSE;
+        if (shown) return FALSE;
+        shown = TRUE;
+        MessageBoxA(NULL, "Unable to initialize IO driver (must execute as Admin)", "ERROR", MB_OK | MB_ICONERROR);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void DisablePortAccess(int portNumber)
+{
+    if (portNumber != 0)
+        return;
+
+    if (!hInpOutDll)
+        return;
+
+    FreeLibrary(hInpOutDll);
+    hInpOutDll = NULL;
+
+    IsInpOutDriverOpen = NULL;
+    DlPortReadPortUchar = NULL;
+    DlPortWritePortUchar = NULL;
+}
+
+static BOOL IsPortAccessEnabled(int portNumber)
+{
+    if (portNumber != 0)
+        return FALSE;
+
+    return hInpOutDll != NULL;
+}
+
+UCHAR ReadPortUchar(USHORT port)
+{
+    const USHORT baseAddr = 0xD010;
+    const USHORT eppBaseAddr = baseAddr + 4;
+    const USHORT ecpBaseAddr = 0xD000;
+
+    /*
+    |Controller: 0x0000d010
+    |EcpController: 0x0000d000
+    */
+
+    if (!EnablePortAccess(((port & 0x300) == 0x300) ? 0 : 1))
+        return 0;
+
+    switch (port) {
+    case 0x378: return DlPortReadPortUchar(baseAddr);
+    case 0x379: return DlPortReadPortUchar(baseAddr + 1);
+    case 0x37A: return DlPortReadPortUchar(baseAddr + 2);
+    case 0x37B: return DlPortReadPortUchar(baseAddr + 3);
+    case 0x37C: return DlPortReadPortUchar(eppBaseAddr);
+    case 0x37D: return DlPortReadPortUchar(eppBaseAddr + 1);
+    case 0x37E: return DlPortReadPortUchar(eppBaseAddr + 2);
+    case 0x37F: return DlPortReadPortUchar(eppBaseAddr + 3);
+    case 0x778: return DlPortReadPortUchar(ecpBaseAddr);
+    case 0x779: return DlPortReadPortUchar(ecpBaseAddr + 1);
+    case 0x77A: return DlPortReadPortUchar(ecpBaseAddr + 2);
+    }
+    return 0;
+}
+
+void WritePortUchar(USHORT port, UCHAR value)
+{
+    const USHORT baseAddr = 0xD010;
+    const USHORT eppBaseAddr = baseAddr + 4;
+    const USHORT ecpBaseAddr = 0xD000;
+
+    /*
+    |Controller: 0x0000d010
+    |EcpController: 0x0000d000
+    */
+
+    if (!EnablePortAccess(((port & 0x300) == 0x300) ? 0 : 1))
+        return;
+
+    switch (port) {
+    case 0x378: DlPortWritePortUchar(baseAddr,value); break;
+    case 0x379: DlPortWritePortUchar(baseAddr + 1, value); break;
+    case 0x37A: DlPortWritePortUchar(baseAddr + 2, value); break;
+    case 0x37B: DlPortWritePortUchar(baseAddr + 3, value); break;
+    case 0x37C: DlPortWritePortUchar(eppBaseAddr, value); break;
+    case 0x37D: DlPortWritePortUchar(eppBaseAddr + 1, value); break;
+    case 0x37E: DlPortWritePortUchar(eppBaseAddr + 2, value); break;
+    case 0x37F: DlPortWritePortUchar(eppBaseAddr + 3, value); break;
+    case 0x778: DlPortWritePortUchar(ecpBaseAddr, value); break;
+    case 0x779: DlPortWritePortUchar(ecpBaseAddr + 1, value); break;
+    case 0x77A: DlPortWritePortUchar(ecpBaseAddr + 2, value); break;
+    }
+    return;
+}
+
+void ReadPS2Scan(USHORT addr, PBYTE dst, DWORD count)
+{
+    // Enable input mode
+    BYTE v = ReadPortUchar(addr + 2);
+    WritePortUchar(addr + 2, v | 0x20);
+
+    // Read each byte
+    BYTE orgCtl = ReadPortUchar(addr + 2);
+    do {
+        WritePortUchar(addr + 2, orgCtl | 0x02);
+        *dst++ = ReadPortUchar(addr);
+        WritePortUchar(addr + 2, orgCtl & (~0x02));
+    } while (--count);
+
+    // Disable input mode
+    v = ReadPortUchar(addr + 2);
+    WritePortUchar(addr + 2, v & (~0x20));
+}
+
+void ReadSPPScan(USHORT addr, PBYTE dst, DWORD count)
+{
+    WritePortUchar(addr, 0xFF);
+
+    BYTE orgCtl = ReadPortUchar(addr + 2);
+    do {
+        WritePortUchar(addr + 2, orgCtl | (0x2 | 0x8));
+        BYTE rd1 = ReadPortUchar(addr + 1);
+        WritePortUchar(addr + 2, orgCtl & (~0x8));
+        BYTE rd2 = ReadPortUchar(addr + 1);
+        WritePortUchar(addr + 2, orgCtl & (~0x2));
+        *dst++ = (rd2 >> 4) | (rd1 & 0xF0);
+    } while (--count);
+
+}
+
+void ReadEPPScan(USHORT addr, PBYTE dst, DWORD count)
+{
+    do {
+        *dst++ = ReadPortUchar(addr + 4);
+    } while (--count);
+}
+
+#else
+
+#define IOCTL_GET_VER           CTL_CODE(0x8000, 0, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_READ_SPP_DATA     CTL_CODE(0x8000, 2, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_READ_STATUS       CTL_CODE(0x8000, 3, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_READ_CONTROL      CTL_CODE(0x8000, 4, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_READ_EPP_ADDRESS  CTL_CODE(0x8000, 5, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_READ_EPP_DATA     CTL_CODE(0x8000, 6, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_WRITE_SPP_DATA    CTL_CODE(0x8000, 7, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_WRITE_STATUS      CTL_CODE(0x8000, 8, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_WRITE_CONTROL     CTL_CODE(0x8000, 9, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_WRITE_EPP_ADDRESS CTL_CODE(0x8000,10, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_WRITE_EPP_DATA    CTL_CODE(0x8000,11, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_SET_READLINE_MODE CTL_CODE(0x8000,12, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_SET_PORT_MODE     CTL_CODE(0x8000,14, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+static HANDLE g_hPortDriver[2] = { INVALID_HANDLE_VALUE,INVALID_HANDLE_VALUE };
+static DWORD g_dwReadMode[2] = { 0xFFFFFFFF,0xFFFFFFFF };
+static UCHAR g_ECONTROL[2] = { 0,0 };
+
+static void EnablePortAccess(int portNumber)
+{
+    if (g_hPortDriver[portNumber] != INVALID_HANDLE_VALUE)
+        return;
+
+    static const char* portName[] = {
+        "\\\\.\\GICPAR0",
+        "\\\\.\\GICPAR1"
+    };
+
+    // Try to open driver
+    HANDLE h = CreateFileA(portName[portNumber], GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, 0);
+    if (h == INVALID_HANDLE_VALUE)
+        return;
+
+    // Store handle
+    g_hPortDriver[portNumber] = h;
+
+    // Make SURE to start port in SPP mode - Otherwise, port detection will not work
+    DWORD dwBytesReturned = 0;
+    UCHAR data = 1; // SPP mode
+    DeviceIoControl(h, IOCTL_SET_PORT_MODE, &data, 1, NULL, 0, &dwBytesReturned, NULL);
+}
+
+static void DisablePortAccess(int portNumber)
+{
+    if (g_hPortDriver[portNumber] == INVALID_HANDLE_VALUE)
+        return;
+
+    CloseHandle(g_hPortDriver[portNumber]);
+    g_hPortDriver[portNumber] = INVALID_HANDLE_VALUE;
+}
+
+static BOOL IsPortAccessEnabled(int portNumber)
+{
+    return (g_hPortDriver[portNumber] != INVALID_HANDLE_VALUE);
+}
+
+static BOOL IOCtlToDriver(int portNumber, DWORD dwioControlCode, UCHAR data)
+{
+    EnablePortAccess(portNumber);
+
+    if (g_hPortDriver[portNumber] == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    DWORD dwBytesReturned = 0;
+    return DeviceIoControl(g_hPortDriver[portNumber], dwioControlCode, &data, 1, NULL, 0, &dwBytesReturned, NULL);
+}
+
+static UCHAR IOCtlFromDriver(int portNumber, DWORD dwioControlCode)
+{
+    EnablePortAccess(portNumber);
+
+    if (g_hPortDriver[portNumber] == INVALID_HANDLE_VALUE)
+        return 0;
+
+    DWORD dwBytesReturned = 0;
+    UCHAR data = 0;
+    if (!DeviceIoControl(g_hPortDriver[portNumber], dwioControlCode, NULL, 0, &data, 1, &dwBytesReturned, NULL) || dwBytesReturned != 1)
+        return 0;
+    return data;
+}
+
+static BOOL ReadFromDriver(int portNumber, DWORD dwReadMode, LPBYTE pBuffer, DWORD dwSize)
+{
+    EnablePortAccess(portNumber);
+
+    if (g_hPortDriver[portNumber] == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    // If not set yet, set the read mode
+    if (g_dwReadMode[portNumber] != dwReadMode) {
+        DWORD dwBytesReturned = 0;
+        if (!DeviceIoControl(g_hPortDriver[portNumber], IOCTL_SET_READLINE_MODE, &dwReadMode, 1, NULL, 0, &dwBytesReturned, NULL))
+            return FALSE;
+        g_dwReadMode[portNumber] = dwReadMode;
+    }
+
+    DWORD dwBytesRead = 0;
+    if (!ReadFile(g_hPortDriver[portNumber], pBuffer, dwSize, &dwBytesRead, NULL) || dwBytesRead != dwSize)
+        return FALSE;
+    return TRUE;
+}
+
+UCHAR ReadPortUchar(USHORT port)
+{
+    UCHAR ret = 0;
+    switch (port) {
+    case 0x378: ret = IOCtlFromDriver(0, IOCTL_READ_SPP_DATA); break;
+    case 0x379: ret = IOCtlFromDriver(0, IOCTL_READ_STATUS); break;
+    case 0x37A: ret = IOCtlFromDriver(0, IOCTL_READ_CONTROL); break;
+    case 0x37B: ret = IOCtlFromDriver(0, IOCTL_READ_EPP_ADDRESS); break;
+    case 0x37C: ret = IOCtlFromDriver(0, IOCTL_READ_EPP_DATA); break;
+    case 0x77A: ret = g_ECONTROL[0]; break;
+    case 0x278: ret = IOCtlFromDriver(1, IOCTL_READ_SPP_DATA); break;
+    case 0x279: ret = IOCtlFromDriver(1, IOCTL_READ_STATUS); break;
+    case 0x27A: ret = IOCtlFromDriver(1, IOCTL_READ_CONTROL); break;
+    case 0x27B: ret = IOCtlFromDriver(1, IOCTL_READ_EPP_ADDRESS); break;
+    case 0x27C: ret = IOCtlFromDriver(1, IOCTL_READ_EPP_DATA); break;
+    case 0x67A: ret = g_ECONTROL[1]; break;
+    }
+   // Log("R[0x%04x] => 0x%02x\n", port, ret);
+    return ret;
+}
+
+void WritePortUchar(USHORT port, UCHAR value)
+{
+    switch (port) {
+        case 0x378: IOCtlToDriver(0, IOCTL_WRITE_SPP_DATA, value); break;
+        case 0x379: IOCtlToDriver(0, IOCTL_WRITE_STATUS, value); break;
+        case 0x37A: IOCtlToDriver(0, IOCTL_WRITE_CONTROL, value); break;
+        case 0x37B: IOCtlToDriver(0, IOCTL_WRITE_EPP_ADDRESS, value); break;
+        case 0x37C: IOCtlToDriver(0, IOCTL_WRITE_EPP_DATA, value); break;
+        case 0x77A: {
+            g_ECONTROL[0] = value;
+            USHORT mode = value & 0xE0;
+            switch (mode) {
+                default:
+                case 0: // Standard (nibble) mode
+                    IOCtlToDriver(0, IOCTL_SET_PORT_MODE, 1); // SPP
+                    break;
+                case 1 << 5: // PS2 mode
+                    IOCtlToDriver(0, IOCTL_SET_PORT_MODE, 2); // PS2
+                    break;
+                case 4 << 5: // EPP mode
+                    IOCtlToDriver(0, IOCTL_SET_PORT_MODE, 3); // EPP
+                    break;
+            }
+            }
+            break;
+        case 0x278: IOCtlToDriver(1, IOCTL_WRITE_SPP_DATA, value); break;
+        case 0x279: IOCtlToDriver(1, IOCTL_WRITE_STATUS, value); break;
+        case 0x27A: IOCtlToDriver(1, IOCTL_WRITE_CONTROL, value); break;
+        case 0x27B: IOCtlToDriver(1, IOCTL_WRITE_EPP_ADDRESS, value); break;
+        case 0x27C: IOCtlToDriver(1, IOCTL_WRITE_EPP_DATA, value); break;
+        case 0x67A: {
+            g_ECONTROL[1] = value;
+            USHORT mode = value & 0xE0;
+            switch (mode) {
+            default:
+            case 0: // Standard (nibble) mode
+                IOCtlToDriver(1, IOCTL_SET_PORT_MODE, 1); // SPP
+                break;
+            case 1 << 5: // PS2 mode
+                IOCtlToDriver(1, IOCTL_SET_PORT_MODE, 2); // PS2
+                break;
+            case 4 << 5: // EPP mode
+                IOCtlToDriver(1, IOCTL_SET_PORT_MODE, 3); // EPP
+                break;
+            }
+        }
+                  break;
+    }
+   // Log("W[0x%04x] <= 0x%02x\n", port, value);
+    return;
+}
+
+void ReadPS2Scan(USHORT addr, PBYTE dst, DWORD count)
+{
+    int portNr = ((addr & 0x300) == 0x300) ? 0 : 1;
+    ReadFromDriver(portNr, 2/*=PS2*/, dst, count);
+}
+
+void ReadSPPScan(USHORT addr, PBYTE dst, DWORD count)
+{
+    int portNr = ((addr & 0x300) == 0x300) ? 0 : 1;
+    ReadFromDriver(portNr, 1/*=SPP*/, dst, count);
+}
+
+void ReadEPPScan(USHORT addr, PBYTE dst, DWORD count)
+{
+    int portNr = ((addr & 0x300) == 0x300) ? 0 : 1;
+    ReadFromDriver(portNr, 3/*=EPP*/, dst, count);
+}
+#endif
+
 
 static LONG WINAPI
 VectoredHandler(
@@ -108,7 +489,7 @@ VectoredHandler(
         PBYTE dst = (PBYTE)Context->Rdi;
         USHORT addr = Context->Rdx & 0xFFFF;
         do {
-            *dst++ = DlPortReadPortUchar(addr);
+            *dst++ = ReadPortUchar(addr);
         } while (--count);
         Context->Rdi = (DWORD64)dst;
         Context->Rcx = 0;
@@ -225,10 +606,10 @@ VectoredHandler(
         // Emulate instructions
         if (instr == 0xE4 || instr == 0xEC) {
             Context->Rax &= 0xFFFFFF00;
-            Context->Rax |= DlPortReadPortUchar(addr);
+            Context->Rax |= ReadPortUchar(addr);
         }
         else {
-            DlPortWritePortUchar(addr, (BYTE)Context->Rax);
+            WritePortUchar(addr, (BYTE)Context->Rax);
         }
 
         Context->Rip += (instr == 0xEE || instr == 0xEC) ? 1 : 2;
@@ -249,7 +630,7 @@ VectoredHandler(
         // ControlCTRLLines acceleration
 
         USHORT addr = Context->Edx & 0xFFFF;
-        BYTE v = DlPortReadPortUchar(addr);
+        BYTE v = ReadPortUchar(addr);
         if ((Context->Ebx & 0xFF00) == 0) {
             // Clear bits
             v &= ~Context->Ebx & 0xFF;
@@ -258,7 +639,7 @@ VectoredHandler(
             // Set bits
             v |= Context->Ebx & 0xFF;
         }
-        DlPortWritePortUchar(addr,v);
+        WritePortUchar(addr,v);
         Context->Eax &= 0xFFFFFF00;
         Context->Eax |= v;
         Context->Eip += 0x49B7 - 0x499E;
@@ -322,28 +703,15 @@ VectoredHandler(
 .text:1000591B
      */
         USHORT addr = Context->Edx & 0xFFFF;
-        addr -= 2;
-
-        // Enable input mode
-        BYTE v = DlPortReadPortUchar(addr + 2);
-        DlPortWritePortUchar(addr + 2, v | 0x20);
-
-        // Read each byte
-        BYTE orgCtl = DlPortReadPortUchar(addr + 2);
+        addr -= 2; // Point to port base address
         DWORD count = Context->Ecx;
         PBYTE dst = (PBYTE)Context->Edi;
-        do {
-            DlPortWritePortUchar(addr + 2, orgCtl | 0x02);
-            *dst++ = DlPortReadPortUchar(addr);
-            DlPortWritePortUchar(addr + 2, orgCtl & (~0x02));
-        } while (--count);
 
-        // Disable input mode
-        v = DlPortReadPortUchar(addr + 2);
-        DlPortWritePortUchar(addr + 2, v & (~0x20));
+        // Read scanline
+        ReadPS2Scan(addr, dst, count);
         
         // Resume execution
-        Context->Edi = (DWORD)dst;
+        Context->Edi += Context->Ecx;
         Context->Ecx = 0;
 
         // Skip routine
@@ -412,23 +780,13 @@ VectoredHandler(
         */
 
         USHORT addr = Context->Edx & 0xFFFF;
-        DlPortWritePortUchar(addr, 0xFF);
-
         DWORD count = Context->Ecx;
         PBYTE dst = (PBYTE)Context->Edi;
 
-        BYTE orgCtl = DlPortReadPortUchar(addr + 2);
-        do {
-            DlPortWritePortUchar(addr + 2, orgCtl | (0x2 | 0x8));
-            BYTE rd1 = DlPortReadPortUchar(addr + 1);
-            DlPortWritePortUchar(addr + 2, orgCtl & (~0x8));
-            BYTE rd2 = DlPortReadPortUchar(addr + 1);
-            DlPortWritePortUchar(addr + 2, orgCtl & (~0x2));
-            *dst++ = (rd2 >> 4) | (rd1 & 0xF0);
-        } while (--count);
+        ReadSPPScan(addr, dst, count);
 
         // Resume execution
-        Context->Edi = (DWORD)dst;
+        Context->Edi += Context->Ecx;
         Context->Eax = Context->Ecx;
         Context->Ecx = 0;
 
@@ -460,11 +818,12 @@ text:10005894                                   ; int ReadLineEPP(void)
 */
         DWORD count = Context->Ecx;
         PBYTE dst = (PBYTE)Context->Edi;
-        USHORT addr = Context->Edx & 0xFFFF;
-        do {
-            *dst++ = DlPortReadPortUchar(addr);
-        } while (--count);
-        Context->Edi = (DWORD)dst;
+        USHORT addr = (Context->Edx & 0xFFFF);
+        addr -= 4;
+
+        ReadEPPScan(addr, dst, count);
+
+        Context->Edi += Context->Ecx;
         Context->Ecx = 0;
 
         // Skip routine
@@ -566,19 +925,6 @@ text:10005894                                   ; int ReadLineEPP(void)
         return EXCEPTION_CONTINUE_EXECUTION;
     }
 
-    // The following LPT is never emulated
-    if ((addr >= 0x278 && addr <= 0x27F) ||
-        (addr >= 0x678 && addr <= 0x67F)
-        ) {
-
-        if (instr == 0xE4 || instr == 0xEC) {
-            Context->Eax &= 0xFFFFFF00;
-        }
-
-        Context->Eip += (instr == 0xEE || instr == 0xEC) ? 1 : 2;
-
-        return EXCEPTION_CONTINUE_EXECUTION;
-    }
 
     // This one will always be emulated, to avoid crashes...
     if (addr >= 0x3BC && addr <= 0x3BF) {
@@ -595,6 +941,7 @@ text:10005894                                   ; int ReadLineEPP(void)
 
         return EXCEPTION_CONTINUE_EXECUTION;
     }
+
     if (addr >= 0x7BC && addr <= 0x7BF) {
 
         if (instr == 0xE4 || instr == 0xEC) {
@@ -610,16 +957,20 @@ text:10005894                                   ; int ReadLineEPP(void)
         return EXCEPTION_CONTINUE_EXECUTION;
     }
 
+    // Emulate first and second parallel ports
     if ((addr >= 0x378 && addr <= 0x37F) ||
-        (addr >= 0x778 && addr <= 0x77F)) {
+        (addr >= 0x778 && addr <= 0x77F) ||
+        (addr >= 0x278 && addr <= 0x27F) ||
+        (addr >= 0x678 && addr <= 0x67F)
+        ) {
 
         // Emulate instructions
         if (instr == 0xE4 || instr == 0xEC) {
             Context->Eax &= 0xFFFFFF00;
-            Context->Eax |= DlPortReadPortUchar(addr);
+            Context->Eax |= ReadPortUchar(addr);
         }
         else {
-            DlPortWritePortUchar(addr, (BYTE)Context->Eax);
+            WritePortUchar(addr, (BYTE)Context->Eax);
         }
 
         Context->Eip += (instr == 0xEE || instr == 0xEC) ? 1 : 2;
@@ -642,54 +993,23 @@ static void End(void)
         FreeLibrary(hRIC32Dll);
         hRIC32Dll = NULL;
     }
-    if (hInpOutDll) {
-        FreeLibrary(hInpOutDll);
-        hInpOutDll = NULL;
-    }
-
-    IsInpOutDriverOpen = NULL;
-    DlPortReadPortUchar = NULL;
-    DlPortWritePortUchar = NULL;
     orgDS_Entry = NULL;
 }
-
 
 static void Init(void)
 {
     hOldVectorHandler = AddVectoredExceptionHandler(CALL_FIRST, VectoredHandler);
     hRIC32Dll = LoadLibraryA("RIC32.ds_");
-    hInpOutDll = LoadLibraryA("inpout32.dll");
-    if (!hInpOutDll) {
-        MessageBoxA(NULL, "Unable to open inout DLL", "ERROR", MB_OK | MB_ICONERROR);
-        End();
-        return;
-    }
     if (!hRIC32Dll) {
         MessageBoxA(NULL, "Unable to open RIC32 DLL", "ERROR", MB_OK | MB_ICONERROR);
         End();
         return;
     }
 
-
-    // Get the IO functions we need to communicate with the scanner.
-    IsInpOutDriverOpen = (lpIsInpOutDriverOpen)GetProcAddress(hInpOutDll, "IsInpOutDriverOpen");
-    DlPortReadPortUchar = (lpDlPortReadPortUchar)GetProcAddress(hInpOutDll, "DlPortReadPortUchar");
-    DlPortWritePortUchar = (lpDlPortWritePortUchar)GetProcAddress(hInpOutDll, "DlPortWritePortUchar");
-
     // Get the DS_Entry 
     orgDS_Entry = (lpDS_Entry)GetProcAddress(hRIC32Dll, "DS_Entry");
-
-    if (!IsInpOutDriverOpen ||
-        !DlPortReadPortUchar ||
-        !DlPortWritePortUchar ||
-        !orgDS_Entry) {
+    if (!orgDS_Entry) {
         MessageBoxA(NULL, "Unable to resolve entry points", "ERROR", MB_OK | MB_ICONERROR);
-        End();
-        return;
-    }
-
-    if (!IsInpOutDriverOpen()) {
-        MessageBoxA(NULL, "Unable to initialize IO driver (must execute as Admin)", "ERROR", MB_OK | MB_ICONERROR);
         End();
         return;
     }
