@@ -985,6 +985,10 @@ text:10005894                                   ; int ReadLineEPP(void)
 
 static void End(void)
 {
+    // Disable port access, if possible
+    DisablePortAccess(0);
+    DisablePortAccess(1);
+
     if (hOldVectorHandler) {
         RemoveVectoredExceptionHandler(hOldVectorHandler);
         hOldVectorHandler = NULL;
